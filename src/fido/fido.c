@@ -45,6 +45,9 @@
 #include "crypto_utils.h"
 #include "otp.h"
 #include "event.h"
+#ifdef ENABLE_BIO
+#include "bio.h"
+#endif
 
 extern char *rp_id;
 extern size_t rp_id_len;
@@ -537,6 +540,15 @@ int wait_button_pressed(void) {
 }
 
 int wait_button_pressed_timeout(uint32_t timeout_seconds) {
+#ifdef ENABLE_BIO
+    if (bio_presence_denied()) {
+        return 2;
+    }
+    bool bio_previous_force = force_button_wait;
+    if (bio_presence_forced()) {
+        force_button_wait = true;
+    }
+#endif
     if (timeout_seconds != 0 || force_button_wait) {
         uint8_t operation = current_fido_operation;
         event_field_t fields[2];
@@ -555,6 +567,9 @@ int wait_button_pressed_timeout(uint32_t timeout_seconds) {
     do {
         queue_remove_blocking(&usb_to_card_q, &val);
     } while (val != EV_BUTTON_PRESSED && val != EV_BUTTON_TIMEOUT && val != EV_BUTTON_CANCELLED);
+#endif
+#ifdef ENABLE_BIO
+    force_button_wait = bio_previous_force;
 #endif
     if (val == EV_BUTTON_TIMEOUT) {
         return 1;

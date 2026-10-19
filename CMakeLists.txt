@@ -79,6 +79,36 @@ if(FORCE_BUTTON_WAIT)
     add_compile_definitions(FORCE_BUTTON_WAIT=1)
 endif()
 
+if(ESP_PLATFORM)
+    option(ENABLE_BIO "Enable/disable SFM-V1.7 fingerprint sensor support" ON)
+else()
+    set(ENABLE_BIO OFF)
+endif()
+configure_bool_option(
+    ENABLE_BIO
+    ENABLE_BIO
+    "Fingerprint sensor: \t\t enabled"
+    "Fingerprint sensor: \t\t disabled"
+)
+if(ENABLE_BIO)
+    set(BIO_UART_NUM 1 CACHE STRING "UART connected to the fingerprint sensor")
+    set(BIO_UART_TX_GPIO 17 CACHE STRING "GPIO to sensor RX")
+    set(BIO_UART_RX_GPIO 18 CACHE STRING "GPIO to sensor TX")
+    set(BIO_EN_GPIO -1 CACHE STRING "GPIO driving the sensor VCC load switch (-1 = always powered)")
+    set(BIO_TOUCH_GPIO -1 CACHE STRING "GPIO connected to sensor TOUCH_OUT (-1 = not wired)")
+    option(BIO_FILM_DETECTION "Enable the sensor's fake-finger (film) detection" OFF)
+    add_compile_definitions(
+        BIO_UART_NUM=${BIO_UART_NUM}
+        BIO_UART_TX_GPIO=${BIO_UART_TX_GPIO}
+        BIO_UART_RX_GPIO=${BIO_UART_RX_GPIO}
+        BIO_EN_GPIO=${BIO_EN_GPIO}
+        BIO_TOUCH_GPIO=${BIO_TOUCH_GPIO}
+    )
+    if(BIO_FILM_DETECTION)
+        add_compile_definitions(BIO_FILM_DETECTION=1)
+    endif()
+endif()
+
 if(ENABLE_OTP_APP OR ENABLE_OATH_APP)
     set(USB_ITF_CCID 1)
     set(USB_ITF_WCID 1)
@@ -133,6 +163,14 @@ if(ENABLE_OTP_APP)
     list(APPEND SOURCES
         ${CMAKE_CURRENT_LIST_DIR}/src/fido/otp_container.c
         ${CMAKE_CURRENT_LIST_DIR}/src/fido/otp.c
+    )
+endif()
+
+if(ENABLE_BIO)
+    list(APPEND SOURCES
+        ${CMAKE_CURRENT_LIST_DIR}/src/bio/sfm.c
+        ${CMAKE_CURRENT_LIST_DIR}/src/bio/bio.c
+        ${CMAKE_CURRENT_LIST_DIR}/src/bio/presence.c
     )
 endif()
 

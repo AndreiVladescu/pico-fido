@@ -28,6 +28,9 @@
 #endif
 #include "fs/phy.h"
 #include "files.h"
+#ifdef ENABLE_BIO
+#include "bio.h"
+#endif
 
 static bool fido_reset_should_clear(uint16_t fid) {
     uint8_t prefix = (uint8_t)(fid >> 8);
@@ -116,7 +119,15 @@ int cbor_reset(void) {
         return CTAP2_ERR_NOT_ALLOWED;
     }
 #endif
+#ifdef ENABLE_BIO
+    /* Wiping the device is always allowed with the button, even when a
+       fingerprint is enrolled or the sensor is missing (see spec.md 3.1). */
+    bio_allow_button(true);
+#endif
     int ret = wait_button_pressed();
+#ifdef ENABLE_BIO
+    bio_allow_button(false);
+#endif
     if (ret == 1) {
         return CTAP2_ERR_USER_ACTION_TIMEOUT;
     }
@@ -128,6 +139,9 @@ int cbor_reset(void) {
         return CTAP2_ERR_PROCESSING;
     }
     init_fido();
+#ifdef ENABLE_BIO
+    bio_reset();
+#endif
 #ifdef DEFAULT_MCUV_NOT_REQUIRED
     set_opts(get_opts() | FIDO2_OPT_MCUV_NOTRQD);
 #endif

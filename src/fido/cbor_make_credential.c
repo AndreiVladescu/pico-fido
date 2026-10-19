@@ -28,6 +28,9 @@
 #include "random.h"
 #include "crypto_utils.h"
 #include "event.h"
+#ifdef ENABLE_BIO
+#include "bio.h"
+#endif
 
 char *rp_id = NULL, *user_name = NULL, *display_name = NULL;
 size_t rp_id_len = 0;
@@ -543,6 +546,16 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
 #endif
             }
         }
+#ifdef ENABLE_BIO
+        else if (!(flags & FIDO2_AUT_FLAG_UP) && bio_requires_match()) {
+            /* Upstream creates credentials without a touch when no PIN token is
+               given. With an enrolled finger we always want a match. */
+            if (check_user_presence() == false) {
+                CBOR_ERROR(CTAP2_ERR_OPERATION_DENIED);
+            }
+            button_pressed = true;
+        }
+#endif
         flags |= FIDO2_AUT_FLAG_UP;
         clearUserPresentFlag();
         clearUserVerifiedFlag();

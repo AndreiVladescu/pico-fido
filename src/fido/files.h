@@ -46,6 +46,7 @@
 #define EF_OTP_SLOT3    0xBB02
 #define EF_OTP_SLOT4    0xBB03
 #define EF_OTP_PIN      0x10A0 // Nitrokey OTP PIN
+#define EF_BIO          0xCE20 // Fingerprint templates and sensor binding
 
 extern file_t *ef_keydev;
 extern file_t *ef_certdev;
