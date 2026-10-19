@@ -3,3 +3,9 @@ build*/
 legacy/
 .DS_Store
 
+# ESP-IDF build outputs
+sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components/
+release/
