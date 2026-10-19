@@ -41,7 +41,11 @@ if ! command -v idf.py >/dev/null 2>&1; then
 fi
 
 cd "$(dirname "$0")"
-git submodule update --init --recursive
+# Only initialise: an unconditional "submodule update" would reset pico-keys-sdk
+# to the recorded commit and drop work in progress on the SDK branch.
+if [ ! -f pico-keys-sdk/CMakeLists.txt ]; then
+    git submodule update --init --recursive
+fi
 
 CMAKE_ARGS=()
 if [ -n "${IDF_CMAKE_ARGS}" ]; then
