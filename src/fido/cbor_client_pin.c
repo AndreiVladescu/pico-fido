@@ -34,6 +34,9 @@
 #include "crypto_utils.h"
 #include "apdu.h"
 #include "object_authorization.h"
+#ifdef ENABLE_BIO
+#include "bio.h"
+#endif
 
 uint32_t usage_timer = 0, initial_usage_time_limit = 0;
 uint32_t max_usage_time_period  = 600 * 1000;
@@ -459,7 +462,11 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
     }
     CBOR_PARSE_MAP_END(map, 1);
 
-    if (pinUvAuthProtocol != 1 && pinUvAuthProtocol != 2) {
+    if (pinUvAuthProtocol != 1 && pinUvAuthProtocol != 2
+#ifdef ENABLE_BIO
+        && subcommand != 0x7 // getUVRetries carries no protocol
+#endif
+        ) {
         CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
     }
 
@@ -770,6 +777,66 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
         needs_power_cycle = false;
         goto err; // No return
     }
+#ifdef ENABLE_BIO
+    else if (subcommand == 0x7) { //getUVRetries
+        if (!bio_sensor_present()) {
+            CBOR_ERROR(CTAP2_ERR_NOT_ALLOWED);
+        }
+        CBOR_CHECK(cbor_encoder_create_map(&encoder, &mapEncoder, 1));
+        CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x05));
+        CBOR_CHECK(cbor_encode_uint(&mapEncoder, bio_uv_retries()));
+    }
+    else if (subcommand == 0x6) { //getPinUvAuthTokenUsingUvWithPermissions
+        if (kax.present == false || kay.present == false || alg == 0) {
+            CBOR_ERROR(CTAP2_ERR_MISSING_PARAMETER);
+        }
+        if (permissions == 0) {
+            CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
+        }
+        if (permissions & CTAP_PERMISSION_PCMR) { // persistent tokens need the PIN
+            CBOR_ERROR(CTAP2_ERR_UNAUTHORIZED_PERMISSION);
+        }
+        if (!bio_uv_configured()) {
+            CBOR_ERROR(CTAP2_ERR_NOT_ALLOWED);
+        }
+        if (bio_uv_retries() == 0) {
+            CBOR_ERROR(CTAP2_ERR_UV_BLOCKED);
+        }
+        if (mbedtls_mpi_read_binary(&hkey.ctx.mbed_ecdh.Qp.X, kax.data, kax.len) != 0) {
+            CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
+        }
+        if (mbedtls_mpi_read_binary(&hkey.ctx.mbed_ecdh.Qp.Y, kay.data, kay.len) != 0) {
+            CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
+        }
+        uint8_t sharedSecret[64];
+        int ret = ecdh((uint8_t)pinUvAuthProtocol, &hkey.ctx.mbed_ecdh.Qp, sharedSecret);
+        if (ret != 0) {
+            mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
+            CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
+        }
+        ret = bio_verify();
+        if (ret != 0) {
+            mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
+            CBOR_ERROR(ret);
+        }
+        resetPinUvAuthToken();
+        beginUsingPinUvAuthToken(true); // a finger on the sensor is also presence
+        paut.permissions = (uint8_t)permissions;
+        if (rpId.present == true) {
+            mbedtls_sha256((uint8_t *) rpId.data, rpId.len, paut.rp_id_hash, 0);
+            paut.has_rp_id = true;
+        }
+        else {
+            paut.has_rp_id = false;
+        }
+        uint8_t pinUvAuthToken_enc[32 + IV_SIZE], poff = ((uint8_t)pinUvAuthProtocol - 1) * IV_SIZE;
+        encrypt((uint8_t)pinUvAuthProtocol, sharedSecret, paut.data, 32, pinUvAuthToken_enc);
+        mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
+        CBOR_CHECK(cbor_encoder_create_map(&encoder, &mapEncoder, 1));
+        CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x02));
+        CBOR_CHECK(cbor_encode_byte_string(&mapEncoder, pinUvAuthToken_enc, 32 + poff));
+    }
+#endif
     else if (subcommand == 0x9 || subcommand == 0x5) { //getPinUvAuthTokenUsingPinWithPermissions
         if (kax.present == false || kay.present == false || pinUvAuthProtocol == 0 || alg == 0 ||
             pinHashEnc.present == false) {
@@ -785,7 +852,11 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
             if (permissions == 0) {
                 CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
             }
-            if ((permissions & CTAP_PERMISSION_BE)) { // Not supported yet
+            if ((permissions & CTAP_PERMISSION_BE)
+#ifdef ENABLE_BIO
+                && !bio_sensor_present()
+#endif
+                ) {
                 CBOR_ERROR(CTAP2_ERR_UNAUTHORIZED_PERMISSION);
             }
             if ((permissions & CTAP_PERMISSION_PCMR) && permissions != CTAP_PERMISSION_PCMR) {
@@ -891,6 +962,9 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
 
         pin_data[0] = MAX_PIN_RETRIES;
         new_pin_mismatches = 0;
+#ifdef ENABLE_BIO
+        bio_uv_retries_reset();
+#endif
 
         file_put_data(ef_pin, CONST_BYTE_ARRAY(pin_data, sizeof(pin_data)));
         mbedtls_platform_zeroize(pin_data, sizeof(pin_data));

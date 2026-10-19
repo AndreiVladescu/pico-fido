@@ -49,6 +49,9 @@
 #define BIO_PROBE_WAIT_MS   3000
 #define BIO_RING_PERIOD_MS  1000
 #define BIO_RESULT_SHOW_MS  400
+/* The SDK reports TIMEOUT for any press seen more than 15 s after the wait
+   started (button.c, button_wait_poll), so a later match could never succeed. */
+#define BIO_WAIT_MAX_S      14
 
 static const char *TAG = "bio";
 
@@ -76,6 +79,7 @@ static volatile bio_job_t job_next = BIO_JOB_PRESENCE;   // set by card task
 static volatile bio_job_t job_kind = BIO_JOB_PRESENCE;   // latched on REQUEST
 static volatile bool job_active = false;
 static volatile bool job_busy = false;
+static volatile uint32_t job_seq = 0;                    // bumped on every REQUEST
 static volatile bio_result_t job_result = BIO_RES_NONE;
 static volatile uint8_t enroll_step = 0;                 // 1..3 while enrolling
 static volatile uint16_t enroll_id = 0;
@@ -187,6 +191,7 @@ bio_mode_t bio_mode(void) {
 }
 
 bool bio_sensor_present(void) {
+    bio_wait_probe();
     return sensor_present;
 }
 
@@ -215,6 +220,10 @@ bool bio_presence_denied(void) {
 
 bool bio_presence_forced(void) {
     return mode == BIO_MODE_BOUND || job_next != BIO_JOB_PRESENCE;
+}
+
+uint32_t bio_wait_timeout(uint32_t timeout_seconds) {
+    return (timeout_seconds == 0 || timeout_seconds > BIO_WAIT_MAX_S) ? BIO_WAIT_MAX_S : timeout_seconds;
 }
 
 void bio_allow_button(bool allow) {
@@ -260,11 +269,17 @@ static void bio_ring_flash(uint8_t color) {
     vTaskDelay(pdMS_TO_TICKS(BIO_RESULT_SHOW_MS));
 }
 
+/* A job is live while its wait is still running. A new REQUEST bumps job_seq,
+   so a runner that is still finishing an old job never serves the new one. */
+static bool bio_job_live(uint32_t seq) {
+    return job_active && job_seq == seq;
+}
+
 /* Returns false if the job was stopped (wait finished elsewhere). */
-static bool bio_job_begin(void) {
+static bool bio_job_begin(uint32_t seq) {
     job_busy = true;
     __sync_synchronize();
-    if (!job_active) {
+    if (!bio_job_live(seq)) {
         job_busy = false;
         return false;
     }
@@ -276,8 +291,8 @@ static void bio_job_end(void) {
     __sync_synchronize();
 }
 
-static void bio_finish(bio_result_t res, bool success) {
-    if (!job_active) {
+static void bio_finish(uint32_t seq, bio_result_t res, bool success) {
+    if (!bio_job_live(seq)) {
         return;
     }
     job_result = res;
@@ -290,21 +305,21 @@ static void bio_finish(bio_result_t res, bool success) {
     }
 }
 
-static void bio_run_presence(void) {
-    while (job_active) {
+static void bio_run_presence(uint32_t seq) {
+    while (bio_job_live(seq)) {
         uint16_t uid = 0;
-        if (!bio_job_begin()) {
+        if (!bio_job_begin(seq)) {
             break;
         }
         uint8_t ret = sfm_match_1n(&uid);
         bio_job_end();
-        if (!job_active) {
+        if (!bio_job_live(seq)) {
             break;
         }
         bool captured = ret == SFM_ACK_SUCCESS || ret == SFM_ACK_FAIL;
         if ((mode == BIO_MODE_UNBOUND && captured) || (ret == SFM_ACK_SUCCESS && bio_owns(uid))) {
             job_uid = uid;
-            bio_finish(BIO_RES_OK, true);
+            bio_finish(seq, BIO_RES_OK, true);
             bio_ring_flash(SFM_RING_GREEN);
         }
         else if (captured) {
@@ -318,24 +333,24 @@ static void bio_run_presence(void) {
     }
 }
 
-static void bio_run_verify(void) {
-    while (job_active) {
+static void bio_run_verify(uint32_t seq) {
+    while (bio_job_live(seq)) {
         uint16_t uid = 0;
-        if (!bio_job_begin()) {
+        if (!bio_job_begin(seq)) {
             break;
         }
         uint8_t ret = sfm_match_1n(&uid);
         bio_job_end();
-        if (!job_active) {
+        if (!bio_job_live(seq)) {
             break;
         }
         if (ret == SFM_ACK_SUCCESS && bio_owns(uid)) {
             job_uid = uid;
-            bio_finish(BIO_RES_OK, true);
+            bio_finish(seq, BIO_RES_OK, true);
             bio_ring_flash(SFM_RING_GREEN);
         }
         else if (ret == SFM_ACK_SUCCESS || ret == SFM_ACK_FAIL) {
-            bio_finish(BIO_RES_NO_MATCH, false);
+            bio_finish(seq, BIO_RES_NO_MATCH, false);
             bio_ring_flash(SFM_RING_RED);
         }
         else if (ret != SFM_ACK_TIMEOUT && ret != SFM_ACK_BREAK) {
@@ -344,41 +359,41 @@ static void bio_run_verify(void) {
     }
 }
 
-static void bio_run_enroll(void) {
+static void bio_run_enroll(uint32_t seq) {
     uint16_t id_out = 0;
-    if (!bio_job_begin()) {
+    if (!bio_job_begin(seq)) {
         return;
     }
     uint8_t ret = sfm_enroll_step(enroll_step, enroll_id, &id_out);
     bio_job_end();
-    if (!job_active) {
+    if (!bio_job_live(seq)) {
         return;
     }
     switch (ret) {
         case SFM_ACK_SUCCESS:
             job_uid = id_out;
-            bio_finish(BIO_RES_OK, true);
+            bio_finish(seq, BIO_RES_OK, true);
             bio_ring_flash(SFM_RING_GREEN);
             return;
         case SFM_ACK_TIMEOUT:
-            bio_finish(BIO_RES_TIMEOUT, false);
+            bio_finish(seq, BIO_RES_TIMEOUT, false);
             break;
         case SFM_ACK_USER_EXIST:
-            bio_finish(BIO_RES_EXISTS, false);
+            bio_finish(seq, BIO_RES_EXISTS, false);
             break;
         case SFM_ACK_FULL:
-            bio_finish(BIO_RES_FULL, false);
+            bio_finish(seq, BIO_RES_FULL, false);
             break;
         case SFM_ACK_BREAK:
-            bio_finish(BIO_RES_CANCELLED, false);
+            bio_finish(seq, BIO_RES_CANCELLED, false);
             break;
         case SFM_ERR_NO_RESPONSE:
         case SFM_ERR_BAD_FRAME:
         case SFM_ACK_HWERROR:
-            bio_finish(BIO_RES_ERROR, false);
+            bio_finish(seq, BIO_RES_ERROR, false);
             break;
         default: // FAIL, IMGERROR, ALGORITHMFAIL, HOMOLOGYFAIL
-            bio_finish(BIO_RES_POOR_QUALITY, false);
+            bio_finish(seq, BIO_RES_POOR_QUALITY, false);
             break;
     }
     bio_ring_flash(SFM_RING_RED);
@@ -415,19 +430,21 @@ static void bio_task(void *arg) {
     bio_probe();
     while (true) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        if (!job_active) {
+        uint32_t seq = job_seq;
+        bio_job_t kind = job_kind;
+        if (!bio_job_live(seq)) {
             continue;
         }
-        sfm_ring(job_kind == BIO_JOB_ENROLL ? SFM_RING_PURPLE : SFM_RING_BLUE, SFM_RING_OFF, BIO_RING_PERIOD_MS);
-        switch (job_kind) {
+        sfm_ring(kind == BIO_JOB_ENROLL ? SFM_RING_PURPLE : SFM_RING_BLUE, SFM_RING_OFF, BIO_RING_PERIOD_MS);
+        switch (kind) {
             case BIO_JOB_PRESENCE:
-                bio_run_presence();
+                bio_run_presence(seq);
                 break;
             case BIO_JOB_VERIFY:
-                bio_run_verify();
+                bio_run_verify(seq);
                 break;
             case BIO_JOB_ENROLL:
-                bio_run_enroll();
+                bio_run_enroll(seq);
                 break;
         }
         bio_ring_idle();
@@ -441,6 +458,7 @@ static int bio_on_request(signal_code_t code, void *data) {
     pulse = 0;
     job_kind = job_next;
     job_result = BIO_RES_NONE;
+    job_seq++;
     if (sensor_present && (mode == BIO_MODE_UNBOUND || mode == BIO_MODE_BOUND)) {
         job_active = true;
         xTaskNotifyGive(bio_task_handle);

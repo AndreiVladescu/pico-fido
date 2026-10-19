@@ -171,6 +171,7 @@ if(ENABLE_BIO)
         ${CMAKE_CURRENT_LIST_DIR}/src/bio/sfm.c
         ${CMAKE_CURRENT_LIST_DIR}/src/bio/bio.c
         ${CMAKE_CURRENT_LIST_DIR}/src/bio/presence.c
+        ${CMAKE_CURRENT_LIST_DIR}/src/fido/cbor_bio_enroll.c
     )
 endif()
 

@@ -80,6 +80,7 @@ extern bool bio_is_bound(void);
 extern bool bio_requires_match(void);    // bound or locked: button alone never counts
 extern bool bio_presence_denied(void);
 extern bool bio_presence_forced(void);
+extern uint32_t bio_wait_timeout(uint32_t timeout_seconds);
 extern bool bio_button_read(bool raw_button);
 extern void bio_allow_button(bool allow);
 
@@ -103,5 +104,9 @@ extern int bio_template_remove(uint16_t id);
 
 /* authenticatorReset: delete all templates on the sensor and unbind */
 extern void bio_reset(void);
+
+#define CTAP_BIO_ENROLLMENT             0x09
+#define CTAP_BIO_ENROLLMENT_PREVIEW     0x40
+extern int cbor_bio_enroll(const uint8_t *data, size_t len);
 
 #endif // _BIO_H_

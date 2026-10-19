@@ -547,6 +547,7 @@ int wait_button_pressed_timeout(uint32_t timeout_seconds) {
     bool bio_previous_force = force_button_wait;
     if (bio_presence_forced()) {
         force_button_wait = true;
+        timeout_seconds = bio_wait_timeout(timeout_seconds);
     }
 #endif
     if (timeout_seconds != 0 || force_button_wait) {

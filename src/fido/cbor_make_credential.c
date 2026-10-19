@@ -413,9 +413,21 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
         CBOR_ERROR(CTAP2_ERR_UNSUPPORTED_ALGORITHM);
     }
 
+#ifdef ENABLE_BIO
+    bool bio_uv = false;
+#endif
     if (options.present) {
         if (options.uv == ptrue) { //5.3
+#ifdef ENABLE_BIO
+            if (pinUvAuthParam.present == false) { // with a token, "uv" is ignored
+                if (!bio_uv_configured()) {
+                    CBOR_ERROR(CTAP2_ERR_INVALID_OPTION);
+                }
+                bio_uv = true;
+            }
+#else
             CBOR_ERROR(CTAP2_ERR_INVALID_OPTION);
+#endif
         }
         if (options.rk != NULL) {
             if (get_opts() & FIDO2_OPT_NORK) { //5.4
@@ -471,6 +483,17 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
             }
         }
     }
+
+#ifdef ENABLE_BIO
+    if (bio_uv) { //11.2 built-in user verification
+        int ret = bio_verify();
+        if (ret != 0) {
+            CBOR_ERROR(ret);
+        }
+        flags |= FIDO2_AUT_FLAG_UV | FIDO2_AUT_FLAG_UP;
+        button_pressed = true;
+    }
+#endif
 
     for (size_t e = 0; e < excludeList_len; e++) { //12.1
         if (excludeList[e].type.present == false || excludeList[e].id.present == false) {

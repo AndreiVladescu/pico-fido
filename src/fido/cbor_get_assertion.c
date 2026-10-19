@@ -34,6 +34,9 @@
 #include "button.h"
 #endif
 #include "event.h"
+#ifdef ENABLE_BIO
+#include "bio.h"
+#endif
 
 int cbor_get_assertion(const uint8_t *data, size_t len, bool next);
 extern char *rp_id, *user_name, *display_name;
@@ -303,9 +306,21 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
                 }
             }
         }
+#ifdef ENABLE_BIO
+        bool bio_uv = false;
+#endif
         if (options.present) {
             if (options.uv == ptrue) { //4.3
+#ifdef ENABLE_BIO
+                if (pinUvAuthParam.present == false) { // with a token, "uv" is ignored
+                    if (!bio_uv_configured()) {
+                        CBOR_ERROR(CTAP2_ERR_INVALID_OPTION);
+                    }
+                    bio_uv = true;
+                }
+#else
                 CBOR_ERROR(CTAP2_ERR_INVALID_OPTION);
+#endif
             }
             if (options.uv == NULL || pinUvAuthParam.present == true) {
                 uv = false;
@@ -350,6 +365,19 @@ int cbor_get_assertion(const uint8_t *data, size_t len, bool next) {
             flags |= FIDO2_AUT_FLAG_UV;
             // Check pinUvAuthToken permissions. See 6.2.2.4
         }
+#ifdef ENABLE_BIO
+        else if (bio_uv) { //6.2 built-in user verification
+            int ret = bio_verify();
+            if (ret != 0) {
+                CBOR_ERROR(ret);
+            }
+            flags |= FIDO2_AUT_FLAG_UV;
+            if (options.up != pfalse) { // the finger on the sensor is also presence
+                flags |= FIDO2_AUT_FLAG_UP;
+            }
+            button_pressed = true;
+        }
+#endif
         if (extensions.present == true && extensions.hmac_secret == ptrue) {
             if (kax.present == false || kay.present == false || crv == 0 || alg == 0 ||
                 salt_enc.present == false || salt_auth.present == false) {

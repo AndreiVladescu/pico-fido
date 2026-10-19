@@ -27,6 +27,9 @@
 #include "management.h"
 #include "ctap2_cbor.h"
 #include "version.h"
+#ifdef ENABLE_BIO
+#include "bio.h"
+#endif
 
 const bool _btrue = true, _bfalse = false;
 
@@ -77,6 +80,11 @@ int cbor_parse(uint8_t cmd, const uint8_t *data, size_t len) {
             else if (data[0] == CTAP_CREDENTIAL_MGMT || data[0] == 0x41) {
                 return cbor_cred_mgmt(data + 1, len - 1);
             }
+#ifdef ENABLE_BIO
+            else if (data[0] == CTAP_BIO_ENROLLMENT || data[0] == CTAP_BIO_ENROLLMENT_PREVIEW) {
+                return cbor_bio_enroll(data + 1, len - 1);
+            }
+#endif
             else if (data[0] == CTAP_CONFIG) {
                 return cbor_config(data + 1, len - 1);
             }

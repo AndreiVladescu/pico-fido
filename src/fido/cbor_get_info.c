@@ -26,6 +26,9 @@
 #include "crypto_utils.h"
 #include "random.h"
 #include "mbedtls/hkdf.h"
+#ifdef ENABLE_BIO
+#include "bio.h"
+#endif
 
 #define CRED_STORE_STATE_SIZE 16
 #define DEV_STATE_SIZE (2 * CRED_STORE_STATE_SIZE)
@@ -89,6 +92,12 @@ int cbor_get_info(void) {
     if (file_get_size(ef_pin_policy) > 2) {
         lfields += 1;
     }
+#ifdef ENABLE_BIO
+    bool bio = bio_sensor_present() && (bio_mode() == BIO_MODE_UNBOUND || bio_mode() == BIO_MODE_BOUND);
+    if (bio) {
+        lfields += 2; // preferredPlatformUvAttempts, uvModality
+    }
+#endif
     CBOR_CHECK(cbor_encoder_create_map(&encoder, &mapEncoder, lfields));
 
     CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x01));
@@ -122,7 +131,13 @@ int cbor_get_info(void) {
     CBOR_CHECK(cbor_encode_byte_string(&mapEncoder, aaguid, sizeof(aaguid)));
 
     CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x04));
-    CBOR_CHECK(cbor_encoder_create_map(&mapEncoder, &arrayEncoder, enterprise_profile ? 11 : 10));
+    size_t noptions = enterprise_profile ? 11 : 10;
+#ifdef ENABLE_BIO
+    if (bio) {
+        noptions += 2; // uv, bioEnroll
+    }
+#endif
+    CBOR_CHECK(cbor_encoder_create_map(&mapEncoder, &arrayEncoder, noptions));
     if (enterprise_profile) {
         CBOR_CHECK(cbor_encode_text_stringz(&arrayEncoder, "ep"));
         CBOR_CHECK(cbor_encode_boolean(&arrayEncoder, true));
@@ -147,6 +162,15 @@ int cbor_get_info(void) {
     CBOR_CHECK(cbor_encode_boolean(&arrayEncoder, true));
     CBOR_CHECK(cbor_encode_text_stringz(&arrayEncoder, "makeCredUvNotRqd"));
     CBOR_CHECK(cbor_encode_boolean(&arrayEncoder, get_opts() & FIDO2_OPT_AUV ? false : get_opts() & FIDO2_OPT_MCUV_NOTRQD));
+#ifdef ENABLE_BIO
+    if (bio) {
+        /* uv is only usable once the PIN has unlocked the device key this power cycle */
+        CBOR_CHECK(cbor_encode_text_stringz(&arrayEncoder, "uv"));
+        CBOR_CHECK(cbor_encode_boolean(&arrayEncoder, bio_uv_configured()));
+        CBOR_CHECK(cbor_encode_text_stringz(&arrayEncoder, "bioEnroll"));
+        CBOR_CHECK(cbor_encode_boolean(&arrayEncoder, bio_is_bound()));
+    }
+#endif
     CBOR_CHECK(cbor_encoder_close_container(&mapEncoder, &arrayEncoder));
 
     CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x05));
@@ -227,6 +251,14 @@ int cbor_get_info(void) {
 
     CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x10));
     CBOR_CHECK(cbor_encode_uint(&mapEncoder, MAX_RPIDS_MINPIN_LENGTH)); // maxRPIDsForSetMinPINLength
+#ifdef ENABLE_BIO
+    if (bio) {
+        CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x11));
+        CBOR_CHECK(cbor_encode_uint(&mapEncoder, 3)); // preferredPlatformUvAttempts
+        CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x12));
+        CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x02)); // uvModality: fingerprint internal
+    }
+#endif
 #ifndef ENABLE_EMULATION
     if (phy_data.vid != 0x1050) {
 #endif
