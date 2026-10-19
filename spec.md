@@ -63,16 +63,15 @@ a LOCKED device from being bricked.
 
 ### 3.2 Persistent state
 
-A new flash file `EF_BIO` (FID `0xCF20`) holds:
+A new flash file `EF_BIO` (FID `0xCE20`; `0xCF00-0xCFFF` belongs to resident credentials) holds,
+serialised byte by byte:
 
 ```
-struct bio_state {
-    uint8_t  version;            // 1
-    uint8_t  sensor_uid[8];      // SFM 0x60 unique id at bind time
-    uint8_t  uv_retries;         // remaining built-in UV attempts
-    uint8_t  count;              // number of owned templates
-    struct { uint16_t id; char name[BIO_NAME_MAX]; } t[BIO_MAX_TEMPLATES];
-};
+version (1) = 1
+sensor_uid (8)        SFM 0x60 unique id at bind time
+uv_retries (1)        remaining built-in UV attempts
+count (1)             number of owned templates (max 10)
+count x { id (2, big endian), name_len (1), name (name_len <= 32) }
 ```
 
 "Bound" = `count > 0`. Only ids listed here count as a match.
@@ -81,14 +80,19 @@ struct bio_state {
 
 `bio.c` runs a FreeRTOS task that owns the UART. Requests come in through a queue:
 
-- `SIGNAL_USER_PRESENCE_REQUEST` (bound mode) → loop `0x0C` 1:N matches (each waits up to 8 s)
-  until a match on an owned id, or until stopped. On a match, set a pulse latch that
+- `SIGNAL_USER_PRESENCE_REQUEST` → run the job queued by the card task (`job_next`):
+  presence (default), verify, or one enrolment capture. Presence loops `0x0C` 1:N matches (each
+  waits up to 8 s) until a match on an owned id, or until stopped. On a match, set a pulse latch that
   `picokey_button_read()` reports as pressed then released. Ring LED: blue breathing while waiting,
   green on match, red on mismatch.
 - `SIGNAL_USER_PRESENCE_{COMPLETED,CANCELLED,TIMEOUT}` → send `0xFE` abort and go idle.
-- Synchronous UV requests (`bio_verify()`), used by `getPinUvAuthTokenUsingUv` and by
-  makeCredential/getAssertion with `uv=true`, block the card task until match/fail/timeout/cancel.
-- Enrol steps (`bio_enroll_*`), driven by `authenticatorBioEnrollment`.
+- Verify and enrol jobs also run inside a forced button wait. Success = press pulse; failure =
+  the task sets `cancel_button` and records the reason in `job_result`. This reuses the SDK's
+  UPNEEDED keepalives, CTAPHID_CANCEL handling, timeout and LED with no SDK changes.
+- Every REQUEST bumps `job_seq`; a runner only acts while its own sequence number is live, so a
+  loop still finishing an old wait can never satisfy the next one.
+- Fingerprint waits are clamped to 14 s: the SDK's `button_wait_poll` turns any press seen more
+  than 15 s after the wait started into a TIMEOUT, so a later match could never succeed.
 
 ## 4. Level 1: fingerprint as user presence
 
@@ -98,25 +102,36 @@ struct bio_state {
   (`force_button_wait = true`) even if `up_btn` was never commissioned.
 - `check_user_presence_for_credential(false)` (credential with "no button" policy) still requires a
   match in BOUND mode.
+- Upstream makeCredential never asks for presence when no pinUvAuthParam is given. In BOUND/LOCKED
+  we add a `check_user_presence()` there (behind `ENABLE_BIO`).
+- Side effect: in BOUND mode the idle button no longer triggers OTP slot typing (the button is
+  only accepted for reset). Use OATH/OTP via the host app instead.
 
 ## 5. Level 2: CTAP 2.1 built-in UV
 
 ### 5.1 getInfo (`cbor_get_info.c`)
 
-When the sensor is present (not BUTTON mode):
+When the sensor is present and the mode is UNBOUND or BOUND:
 
-- options `uv`: true if bound, false if not (capable but not configured).
-- options `bioEnroll`: true if bound, false if not.
-- `uvModality` (0x0E): `0x02` (fingerprint internal).
-- `preferredPlatformUvAttempts` (0x11): 3. `maxUvAttemptsForInternalDetection`? Not needed.
+- options `uv`: true only if bound **and** the device key is unlocked (see below).
+- options `bioEnroll`: true if bound, false if not (capable but nothing enrolled).
+- `preferredPlatformUvAttempts` (0x11): 3.
+- `uvModality` (0x12): `0x02` (fingerprint internal).
 - `uvCountSinceLastPinEntry`: not implemented.
+
+**PIN once per power-up.** Upstream encrypts the device key with a key derived from the PIN and
+only unlocks it (`keydev_unlocked`) when the PIN is entered. A fingerprint can't derive that key,
+so after power-up the first operation needs the PIN. Until then getInfo reports `uv: false` (and
+upstream's `alwaysUv: true`), so browsers ask for the PIN; afterwards they use the fingerprint.
 
 ### 5.2 clientPIN (`cbor_client_pin.c`)
 
-- `0x06 getPinUvAuthTokenUsingUvWithPermissions`: requires bound + uv_retries > 0. Calls
-  `bio_verify()`; on success the token is issued exactly like subcommand 0x09 (same permissions/rpId
-  handling), and `uv_retries` is reset. On failure → decrement `uv_retries`, return
-  `CTAP2_ERR_UV_INVALID`, or `CTAP2_ERR_UV_BLOCKED` at 0.
+- `0x06 getPinUvAuthTokenUsingUvWithPermissions`: requires `uv` configured (else
+  `CTAP2_ERR_NOT_ALLOWED`) and uv_retries > 0 (else `CTAP2_ERR_UV_BLOCKED`). Calls `bio_verify()`;
+  on success the token is issued like subcommand 0x09 with `user_present = true` (the finger is
+  also presence, so no second touch), and `uv_retries` is reset. On a wrong finger → decrement
+  `uv_retries`, return `CTAP2_ERR_UV_INVALID`, or `CTAP2_ERR_UV_BLOCKED` at 0. The persistent
+  `pcmr` permission still needs the PIN.
 - `0x07 getUVRetries`: returns `uvRetries` (0x05).
 - A successful PIN token (0x05/0x09) resets `uv_retries`.
 
@@ -162,8 +177,10 @@ returns the device to UNBOUND. Sample status mapping: SFM `ACK_SUCCESS`→`CTAP2
    attacker who opens the device can fake "match OK". Accepted risk for this project; mitigate by
    enclosing or potting the sensor-to-MCU wiring. Enable ESP32-S3 secure boot + flash encryption to
    protect key material.
-5. **Anti-spoof:** enable SFM film-attack detection (`0x3F 00 04 01`) before enrolment and matching
-   level 2 (default, 1/1M FAR).
+5. **Anti-spoof:** the SFM has a film-attack detector (`0x3F 00 04 01`). It is off by default
+   (`-DBIO_FILM_DETECTION=ON` to enable) until its false-reject rate is measured on real fingers.
+   Matching level stays at the module default (2, 1/1M FAR).
+6. **OTP button:** see section 4. In BOUND mode the bare button can't type OTP slots.
 
 ## 7. Hardware
 
@@ -178,9 +195,28 @@ returns the device to UNBOUND. Sample status mapping: SFM `ACK_SUCCESS`→`CTAP2
 ## 8. Plan
 
 1. ✅ Fork setup, ESP32-only build script, SDK button hook; stock firmware builds.
-2. SFM driver + self-test at boot (unique id, user count, ring LED) logged over serial.
-3. Level 1: presence provider, binding, LOCKED state, reset escape.
-4. Level 2: `bioEnroll`, `uv` in getInfo, clientPIN 0x06/0x07, UV flag in makeCredential/getAssertion.
-5. PCB, using pins validated on a dev board.
+2. ✅ SFM driver + self-test at boot (unique id, user count, cyan ring flash) logged over serial.
+3. ✅ Level 1: presence provider, binding, LOCKED state, reset escape.
+4. ✅ Level 2: `bioEnroll`, `uv` in getInfo, clientPIN 0x06/0x07, UV flag in makeCredential/getAssertion.
+5. Hardware bring-up (see checklist below).
+6. PCB, using pins validated on a dev board.
+
+Steps 2-4 compile cleanly (`-Wall -Wextra -Wshadow`) but have **not run on hardware yet**.
+
+### Hardware test checklist
+
+1. Flash with no sensor attached → log `no sensor detected`, mode `button`, stock behaviour.
+2. Attach the sensor (TX→GPIO18, RX→GPIO17, 3V3, GND) → cyan flash at boot, log shows the unique id
+   and mode `unbound`.
+3. `chrome://settings/securityKeys`: set a PIN, then Fingerprints → add. Expect 3 purple-ring captures
+   and the template listed. Rename it, add a second finger, remove one.
+4. `fido2-token -I /dev/hidrawN`: `uv: true` after entering the PIN once, `bioEnroll: true`.
+5. Register/sign in on webauthn.io with UV preferred → fingerprint only, no PIN after the first unlock.
+6. Wrong finger 3 times → browser falls back to PIN; `fido2-token -I` retries count goes down and resets
+   after a PIN entry.
+7. Unplug the sensor and reboot → mode `locked`, every request denied; authenticatorReset with the
+   button still works and returns the board to `button` mode.
+8. Swap in a second sensor → mode `locked`.
+9. U2F (`fido2-cred -M` with `-u`) and OATH touch-required codes need the finger in bound mode.
 
 Other to-dos before shipping: own AAGUID, own USB VID/PID (0x2E8A is Raspberry Pi's).

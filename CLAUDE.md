@@ -27,6 +27,8 @@ The variant is detected at runtime by probing the sensor over UART at boot.
 - Match the surrounding C style: 4-space indent, `snake_case`, `PICOKEYS_OK`/`CTAP2_ERR_*` return
   codes, `CBOR_*` helper macros in `cbor_*.c`.
 - License: AGPL-3.0 (inherited). Distributed binaries must ship with source.
+- Commit at each milestone. Messages follow upstream style: short imperative subject ("Add ...",
+  "Fix ..."), no body, only a `Signed-off-by:` trailer. No co-author trailers.
 
 ## Build
 
@@ -41,9 +43,18 @@ IDF_CMAKE_ARGS="-DENABLE_BIO=OFF" ./build_esp32.sh   # stock build, no fingerpri
 The build directory is `build_esp32/`. The first build fetches mbedtls/tinycbor into
 `pico-keys-sdk/third-party/` and IDF managed components into `managed_components/`.
 
-Board pin options (CMake cache, see `CMakeLists.txt`): `BIO_UART_NUM`, `BIO_UART_TX_GPIO`,
-`BIO_UART_RX_GPIO`, `BIO_EN_GPIO` (sensor VCC load switch, -1 = always powered),
-`BIO_TOUCH_GPIO` (sensor TOUCH_OUT, -1 = not wired).
+Board pin options (CMake cache, see `CMakeLists.txt`): `BIO_UART_NUM` (1), `BIO_UART_TX_GPIO` (17),
+`BIO_UART_RX_GPIO` (18), `BIO_EN_GPIO` (sensor VCC load switch, -1 = always powered),
+`BIO_TOUCH_GPIO` (sensor TOUCH_OUT, -1 = not wired), `BIO_FILM_DETECTION` (OFF).
+
+`build_esp32.sh` only runs `git submodule update` when the SDK is missing, so work on the SDK's
+`fingerprint` branch isn't reset. After changing the SDK, commit there and then commit the new
+submodule pointer here. The IDF component dependency pass can't see project variables like
+`ENABLE_BIO`, which is why `src/fido/CMakeLists.txt` always requires the UART/GPIO drivers.
+
+There is no hardware-in-the-loop or host test for the bio code yet; `spec.md` §8 has the manual
+hardware checklist. To lint the new files with stricter flags, re-run their entries from
+`build_esp32/compile_commands.json` with `-Wall -Wextra -Wshadow -fsyntax-only`.
 
 ## Code map
 
@@ -65,11 +76,18 @@ Board pin options (CMake cache, see `CMakeLists.txt`): `BIO_UART_NUM`, `BIO_UART
    USB/core0 task and blocks on the queue.
 2. core0 calls `button_wait_start_timeout()` → emits `SIGNAL_USER_PRESENCE_REQUEST`, then polls
    `picokey_button_read()` every 10 ms until pressed→released, timeout, or CTAPHID cancel.
-3. In fingerprint mode `bio.c` starts a 1:N match on the REQUEST signal. A match on an id we own
-   produces one pressed→released pulse from `picokey_button_read()`.
+3. `bio.c` runs the job the card task queued (`job_next`: presence by default, or verify / one
+   enrolment capture via `bio_run_job()`). Success → one pressed→released pulse from
+   `picokey_button_read()`. Failure → the bio task sets `cancel_button` and stores the reason in
+   `job_result`.
 
-A timeout of 0 means "don't wait" upstream (`up_btn` not commissioned). Bound fingerprint mode
-forces the wait with `force_button_wait`.
+A timeout of 0 means "don't wait" upstream (`up_btn` not commissioned). Bound mode and every
+verify/enrol job force the wait (`force_button_wait`) and clamp it to 14 s: the SDK rejects
+presses seen more than 15 s after the wait started. Each REQUEST bumps `job_seq`, so a runner
+finishing an old wait can't satisfy a new one. Keep that property if you touch the task.
+
+The PIN is needed once per power-up: upstream encrypts the device key with a PIN-derived key
+(`keydev_unlocked`). `bio_uv_configured()` and getInfo's `uv` stay false until then.
 
 ## SFM-V1.7 quick reference
 
